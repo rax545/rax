@@ -60,9 +60,10 @@ LUNA GF is a transparent, playful, girlfriend-style **AI companion role-play bot
 
 ### 2.6 Optional natural AI layer
 
-- Without an API key, Luna uses a local, deterministic Bangla fallback and all core features still run.
-- With `AI_API_KEY`, `AI_BASE_URL` and `AI_MODEL`, Luna calls an OpenAI-compatible Chat Completions endpoint.
-- The system prompt enforces transparent companion behavior, consent, non-coercion, privacy and safe-game boundaries.
+- Without an API key, Luna uses a context-aware local Bangla/English fallback: it recognises greetings, check-ins, missing/love language, food, study/work, boredom and vulnerable moods, then asks a natural follow-up instead of returning a fixed canned line.
+- Opt-in scheduled DMs use warm personal check-ins and the member's nickname rather than random roast copy.
+- With `AI_API_KEY`, `AI_BASE_URL` and `AI_MODEL`, Luna calls an OpenAI-compatible Chat Completions endpoint for genuinely open-ended, context-aware replies.
+- The system prompt enforces transparent companion behavior, consent, non-coercion, privacy and safe-game boundaries, while instructing the model to avoid repetitive disclaimers and respond to the member's actual last detail.
 - Conversation context is in memory only and can be cleared with `/gf_forget`; it disappears when the process restarts.
 
 ### 2.7 18+ Hotness System — consent-gated mature romance
