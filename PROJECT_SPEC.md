@@ -1,6 +1,6 @@
 # LUNA GF — Real AI Companion: Final Project Specification
 
-**Version:** 1.0 · **Platform:** Discord · **Primary language:** Bangla + English mix  
+**Version:** 1.1 · **Platform:** Discord · **Primary language:** Bangla + English mix
 **Status:** implementation-ready in this repository
 
 ## 1. Product vision
@@ -65,6 +65,23 @@ LUNA GF is a transparent, playful, girlfriend-style **AI companion role-play bot
 - The system prompt enforces transparent companion behavior, consent, non-coercion, privacy and safe-game boundaries.
 - Conversation context is in memory only and can be cleared with `/gf_forget`; it disappears when the process restarts.
 
+### 2.7 18+ Hotness System — consent-gated mature romance
+
+The mature-romance layer is **adult-only by self-confirmation, explicitly opt-in, and non-graphic**. It provides confident flirting, attractive compliments, playful jealousy and late-night romance without sexual acts, nudity, pornography, sexting, image requests or coercion.
+
+- `/gf_age_confirm confirm:true|false`: self-confirm or remove 18+ status. Discord cannot perform legal age verification, so the limitation is shown to the member.
+- `/gf_hotness [level]`: view or set `Warm flirt`, `Bold flirt` or `Spicy romance` intensity.
+- `/gf_hotmode mode:on|off`: explicit hot-mode switch; it is OFF by default.
+- `/gf_flirt [message]`: private, consent-gated mature flirt response.
+- `/gf_latenight [message]`: private soft/intimate late-night tone; no audio or clock history is stored.
+- `/gf_jealous mode:on|off`: playful jealousy only; it never controls, isolates or shames the member.
+- `/gf_hot_truth_or_dare [mode]`: adult-themed but safe/skippable Truth or Dare prompts.
+- `/gf_couple_question`: mature relationship question without requiring private disclosure.
+- `/gf_boundary mode:soft|reset` and `/gf_hot_stop`: immediate tone change/stop controls.
+- Boundary phrases such as “stop”, “too much”, “not comfortable”, `থামো`, or `বিষয় বদলাও` automatically disable hot mode and switch Luna to a soft respectful tone. Re-enabling requires a deliberate reset and hot-mode command.
+- Mature commands respond ephemerally by default so adult-themed copy is not broadcast to a public channel.
+- Provider output is checked for a small set of explicit markers and replaced with safe local copy if detected.
+
 ## 3. Slash-command contract
 
 | Command | Visibility | Purpose |
@@ -72,6 +89,15 @@ LUNA GF is a transparent, playful, girlfriend-style **AI companion role-play bot
 | `/gf_chat message` | public response | Mood-aware AI conversation |
 | `/gf_mood` | ephemeral | Latest mood style signal |
 | `/gf_forget` | ephemeral | Clear temporary chat context |
+| `/gf_age_confirm confirm` | ephemeral | Self-confirm/remove 18+ gate |
+| `/gf_hotness [level]` | ephemeral | View/set mature-romance level |
+| `/gf_hotmode mode` | ephemeral | Explicit hot-mode on/off |
+| `/gf_flirt [message]` | ephemeral | Mature non-graphic flirt |
+| `/gf_latenight [message]` | ephemeral | Intimate late-night tone |
+| `/gf_jealous mode` | ephemeral | Playful jealousy on/off |
+| `/gf_hot_truth_or_dare [mode]` | ephemeral | Consent-gated mature game |
+| `/gf_couple_question` | ephemeral | Mature couple question |
+| `/gf_boundary mode` / `/gf_hot_stop` | ephemeral | Immediate boundary control |
 | `/gf_nickname [nickname]` | ephemeral | Set/view member nickname |
 | `/gf_nickname_clear` | ephemeral | Remove nickname |
 | `/gf_relationship` | ephemeral | Full relationship meter |
@@ -101,7 +127,8 @@ Discord slash command
         ├── SQLite Database (profile, mood, points, nickname, opt-ins)
         ├── AIChatProvider (optional OpenAI-compatible chat endpoint)
         ├── Local personality fallback
-        └── VoiceService (TTS → temporary audio → FFmpeg → Discord VC)
+        ├── VoiceService (TTS → temporary audio → FFmpeg → Discord VC)
+        └── HotnessPolicy (age gate, hot mode, level and boundaries)
 ```
 
 ### Repository modules
@@ -112,8 +139,9 @@ Discord slash command
 - `relationship.py` — stages, progress bars and capped scoring rules.
 - `games.py` — safe prompt/question bank.
 - `personality.py` — mood-aware local fallback replies.
-- `ai_provider.py` — optional chat completion adapter.
+- `ai_provider.py` — optional chat completion adapter with hot-mode prompt policy.
 - `voice.py` — TTS provider abstraction and Discord playback.
+- `hotness.py` — mature-romance prompt bank, boundary detector and output safety filter.
 - `.env.example` — configuration template.
 - `Dockerfile` — Python + FFmpeg + espeak-ng image.
 
@@ -133,7 +161,11 @@ SQLite is the default persistence layer. The original `optins`, `settings` and `
 
 `(user_id, guild_id)` primary key and `auto_reply` flag. It records only the voice opt-in, never audio.
 
-`/gf_delete_data confirm:true` removes the member's opt-ins, profile, relationship rows, voice preference, DM log and in-memory chat/quiz state for the current server.
+### `hotness_preferences`
+
+`(user_id, guild_id)` primary key with enabled flag, intensity level, 18+ self-confirmation, playful-jealousy flag, boundary state and update time. Mature copy is never enabled by default.
+
+`/gf_delete_data confirm:true` removes the member's opt-ins, profile, relationship rows, voice preference, hotness preference, DM log and in-memory chat/quiz state for the current server.
 
 ## 6. Configuration
 
@@ -191,7 +223,9 @@ TTS_VOICE=nova
 - Generated text uses mention suppression; nickname input rejects mass mentions.
 - Mood detection is not a clinical tool. High-risk or crisis language should receive calm encouragement to contact a trusted person or local emergency/crisis support.
 - Truth, Dare and Quiz content is safe, skippable and non-coercive.
-- No password, payment, exact-location or unnecessary sensitive-data requests.
+- The hotness layer requires an explicit 18+ self-confirmation and separate hot-mode opt-in; it stays non-graphic and never asks for images, sexual acts, passwords, payment, exact location or unnecessary sensitive data.
+- Playful jealousy never discourages friends, partners or real-world relationships, and never uses relationship points as pressure.
+- A phrase like “stop”, “too much”, “not comfortable”, `থামো` or `বিষয় বদলাও` immediately disables hot mode and changes Luna to a soft tone. `/gf_hot_stop` is always available.
 - Members can clear temporary context with `/gf_forget` and stored server data with `/gf_delete_data confirm:true`.
 
 ## 9. Acceptance criteria
@@ -205,6 +239,10 @@ TTS_VOICE=nova
 - [x] External TTS failure falls back or returns a helpful setup message; it does not crash the bot.
 - [x] Existing opt-in DM, roast channel and status features remain available.
 - [x] A member can delete stored profile data and clear in-memory context.
+- [x] Adult romance stays OFF until 18+ self-confirmation and `/gf_hotmode mode:on`.
+- [x] `/gf_hotness`, `/gf_flirt`, `/gf_latenight`, `/gf_jealous`, mature games and boundary commands are registered.
+- [x] Boundary phrases immediately disable mature mode and use a soft fallback.
+- [x] Mature provider output is filtered for explicit markers and replaced with non-graphic local copy.
 
 ## 10. Future extension points
 

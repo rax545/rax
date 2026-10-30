@@ -12,6 +12,7 @@ LUNA GF হলো Bangla + English mixed একটি **transparent AI companion
 - **Daily Relationship Level:** `/gf_relationship` — friendship, affection, daily activity, stage ও streak; points capped এবং fictional progress meter।
 - **Personalized Nickname:** `/gf_nickname`, `/gf_nickname_clear` — প্রত্যেক member-এর জন্য server-scoped আলাদা nickname।
 - **Optional real AI replies:** `AI_API_KEY` দিলে OpenAI-compatible Chat Completions ব্যবহার করে আরও natural reply; key না থাকলে local Bangla fallback কাজ করে।
+- **18+ Hotness System:** `/gf_age_confirm`, `/gf_hotness`, `/gf_hotmode`, `/gf_flirt`, `/gf_latenight`, `/gf_jealous`, `/gf_hot_truth_or_dare`, `/gf_couple_question` — explicit opt-in mature flirting, spicy-but-non-graphic compliments, playful jealousy এবং late-night romance। `/gf_boundary` ও `/gf_hot_stop` সঙ্গে সঙ্গে tone soft করে।
 - Existing opt-in scheduled DMs, roasts, admin channel settings এবং SQLite persistence রাখা হয়েছে।
 
 পূর্ণ final specification: **[PROJECT_SPEC.md](PROJECT_SPEC.md)**
@@ -60,7 +61,9 @@ TTS_VOICE=nova
 - Scheduled DM কেবল `/gf_optin` করার পর; `/gf_optout` যেকোনো সময়।
 - Voice command-triggered; bot audio record বা transcribe করে না।
 - Raw chat SQLite-এ save হয় না; optional AI provider চালু থাকলে current message ও short in-memory context provider-এ যায়। `/gf_forget` context clear করে।
-- `/gf_delete_data confirm:true` current server-এর profile, nickname, relationship, voice preference, opt-in ও DM log মুছে দেয়।
+- `/gf_delete_data confirm:true` current server-এর profile, nickname, relationship, voice preference, hotness preference, opt-in ও DM log মুছে দেয়।
+- 18+ mode self-confirmation + explicit hot-mode opt-in ছাড়া চালু হয় না। Content mature-romantic কিন্তু non-graphic; image request, sexual act, sexting বা coercion নেই।
+- “stop”, “too much”, “not comfortable”, `থামো` বা `বিষয় বদলাও` বললে hot mode সঙ্গে সঙ্গে বন্ধ হয়ে soft tone হয়।
 - Mood detector emotional diagnosis নয়। Game prompts safe এবং skip করা যায়।
 
 ## Render deployment
