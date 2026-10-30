@@ -1,0 +1,16 @@
+services:
+  - type: worker
+    name: luna-gf-discord-bot
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    autoDeploy: false
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: GUILD_ID
+        sync: false
+      - key: MAX_DAILY_DMS
+        value: "2"
+      - key: DATABASE_PATH
+        value: data/luna_gf.sqlite3
