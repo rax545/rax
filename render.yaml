@@ -10,7 +10,19 @@ services:
         sync: false
       - key: GUILD_ID
         sync: false
+      - key: AI_API_KEY
+        sync: false
+      - key: TTS_API_KEY
+        sync: false
       - key: MAX_DAILY_DMS
         value: "2"
+      - key: RELATIONSHIP_DAILY_CAP
+        value: "40"
       - key: DATABASE_PATH
         value: data/luna_gf.sqlite3
+      - key: TTS_PROVIDER
+        value: auto
+      - key: AI_MODEL
+        value: gpt-4o-mini
+      - key: TTS_MODEL
+        value: gpt-4o-mini-tts

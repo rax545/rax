@@ -1,63 +1,72 @@
-# LUNA GF — Discord Bot
+# LUNA GF — Real AI Discord Companion
 
-A playful mixed-personality Discord companion with **opt-in scheduled DMs**, slash-command chat/roasts, and an admin-configured roast channel.
+LUNA GF হলো Bangla + English mixed একটি **transparent AI companion role-play bot**—real human girlfriend সেজে নয়, কিন্তু warm, personal এবং mood-aware conversational experience দেওয়ার জন্য। এই version-এ Voice GF, AI Mood Detection, Couple Games, Daily Relationship Level এবং member-wise Personalized Nickname যোগ করা হয়েছে।
 
-## Features
-- `/gf_optin` and `/gf_optout`: members control whether scheduled DMs are allowed.
-- `/gf_chat`: friendly mixed cute/savage replies.
-- `/gf_roast`: on-demand playful roast.
-- `/gf_setchannel`, `/gf_channel`, `/gf_post`: admin-only channel configuration and posting.
-- `/gf_status`: view personal/server settings.
-- SQLite persistence; no external database required.
-- Daily DM cap to reduce unwanted messages.
+> “Real GF-এর মতো” এখানে natural conversation, affectionate tone, continuity এবং voice বোঝায়; deception, pressure বা real relationship-এর বদলি নয়।
 
-## Requirements
-- Python 3.10+
-- A Discord application/bot from the Discord Developer Portal.
+## নতুন feature সংক্ষেপ
 
-## Local setup (Windows / VS Code)
-1. Install Python 3.10 or newer.
-2. Extract the ZIP and open the folder in VS Code.
-3. Open Terminal and run:
-   ```powershell
-   py -m venv .venv
-   .venv\Scripts\activate
-   pip install -r requirements.txt
-   ```
-4. Copy `.env.example` to `.env`.
-5. Put your bot token in `DISCORD_TOKEN`.
-6. Put your Discord server ID in `GUILD_ID` for immediate command sync (optional but recommended while testing).
-7. In Discord Developer Portal → Bot, enable **Server Members Intent**. Message Content Intent is not required.
-8. Invite the bot with `bot` and `applications.commands` scopes. Grant View Channels, Send Messages, Embed Links (optional), and Read Message History (optional) permissions. Do not grant Administrator unless you truly need it.
-9. Run:
-   ```powershell
-   python bot.py
-   ```
+- **Voice GF:** `/gf_voice_join`, `/gf_voice_say`, `/gf_voice_mode`, `/gf_voice_leave` — Discord VC-তে কথা বলা। OpenAI-compatible TTS অথবা Docker-এর local `espeak-ng` fallback। Recording/transcription নেই।
+- **AI Mood Detection:** `/gf_chat`-এর Bangla/English কথার tone দেখে joyful, sad, stressed, angry, romantic, tired বা neutral style বেছে নেয়। `/gf_mood`-এ দেখা যায়; diagnosis নয়।
+- **Couple Games:** safe/skippable `/gf_truth_or_dare` এবং button-based `/gf_quiz` (`/gf_quiz_answer` text fallback)।
+- **Daily Relationship Level:** `/gf_relationship` — friendship, affection, daily activity, stage ও streak; points capped এবং fictional progress meter।
+- **Personalized Nickname:** `/gf_nickname`, `/gf_nickname_clear` — প্রত্যেক member-এর জন্য server-scoped আলাদা nickname।
+- **Optional real AI replies:** `AI_API_KEY` দিলে OpenAI-compatible Chat Completions ব্যবহার করে আরও natural reply; key না থাকলে local Bangla fallback কাজ করে।
+- Existing opt-in scheduled DMs, roasts, admin channel settings এবং SQLite persistence রাখা হয়েছে।
 
-## First use
-- Member runs `/gf_optin` to consent to scheduled DMs.
-- Member runs `/gf_optout` at any time to stop them.
-- Admin runs `/gf_setchannel` and chooses a text channel.
-- Admin runs `/gf_channel enabled:true` to enable channel posting.
-- Admin can run `/gf_post` to test one message.
-- `/gf_chat` and `/gf_roast` are on-demand commands.
+পূর্ণ final specification: **[PROJECT_SPEC.md](PROJECT_SPEC.md)**
+
+## Setup
+
+Requirements: Python 3.10+, Discord application/bot, and for voice either Docker or FFmpeg + espeak-ng. `PyNaCl` and `davey` are included for Discord voice encryption/transport.
+
+```bash
+python -m venv .venv
+# Windows
+.venv\Scripts\activate
+# Linux/macOS
+# source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+python bot.py
+```
+
+`.env`-এ কমপক্ষে সেট করো:
+
+```env
+DISCORD_TOKEN=your_discord_bot_token
+GUILD_ID=your_test_server_id
+```
+
+`GUILD_ID` development-এ slash command instant sync করে; production-এ blank রাখলে global sync হবে। Optional real AI + high-quality voice:
+
+```env
+AI_API_KEY=
+AI_BASE_URL=https://api.openai.com/v1
+AI_MODEL=gpt-4o-mini
+TTS_PROVIDER=auto
+TTS_API_KEY=
+TTS_BASE_URL=https://api.openai.com/v1
+TTS_MODEL=gpt-4o-mini-tts
+TTS_VOICE=nova
+```
+
+## Discord permissions
+
+`bot` এবং `applications.commands` scopes ব্যবহার করো। View Channel, Send Messages, Embed Links, Read Message History, **Connect** এবং **Speak** যথেষ্ট; Administrator দরকার নেই। Scheduled member DMs চাইলে **Server Members Intent** enable করো। Message Content Intent দরকার নেই।
+
+## Privacy / trust
+
+- Scheduled DM কেবল `/gf_optin` করার পর; `/gf_optout` যেকোনো সময়।
+- Voice command-triggered; bot audio record বা transcribe করে না।
+- Raw chat SQLite-এ save হয় না; optional AI provider চালু থাকলে current message ও short in-memory context provider-এ যায়। `/gf_forget` context clear করে।
+- `/gf_delete_data confirm:true` current server-এর profile, nickname, relationship, voice preference, opt-in ও DM log মুছে দেয়।
+- Mood detector emotional diagnosis নয়। Game prompts safe এবং skip করা যায়।
 
 ## Render deployment
-1. Push this folder to a GitHub repository.
-2. In Render, create a **Background Worker** from the repo (Docker runtime).
-3. Add environment variables `DISCORD_TOKEN`, `GUILD_ID`, and `MAX_DAILY_DMS=2`.
-4. Deploy. Keep a persistent disk mounted at `/app/data` if your Render plan supports it; without persistent storage, SQLite settings can reset on redeploy/restart.
 
-## Important behavior
-- The bot never sends scheduled DMs to members who have not explicitly opted in.
-- The bot does not scrape or message every server member.
-- Scheduled DMs are capped at two per user per UTC day by default.
-- Keep roasts playful; do not target protected traits, threats, sexual content, or personal vulnerabilities.
-- Discord may block DMs based on recipient privacy settings.
-- This starter uses curated local responses, not a paid AI API. You can add an AI provider later if you want more natural conversation.
+`render.yaml`/`Dockerfile` দিয়ে Background Worker হিসেবে deploy করা যায়। `DISCORD_TOKEN`, `AI_API_KEY`, `TTS_API_KEY` dashboard secret হিসেবে দাও। SQLite reset ঠেকাতে `/app/data`-তে persistent disk ব্যবহার করো।
 
-## Troubleshooting
-- `DISCORD_TOKEN is missing`: create `.env` from `.env.example` and set the token.
-- Slash commands not showing: set `GUILD_ID`, restart, and ensure `applications.commands` scope was included.
-- Bot cannot post: check channel permissions and that the selected channel is visible to the bot.
-- DMs fail: the user may have server DMs disabled; they can still use public slash commands.
+## Existing/admin commands
+
+`/gf_status`, `/gf_roast`, `/gf_setchannel`, `/gf_channel`, `/gf_post` আগের মতো আছে। Admin permission কেবল channel configuration/posting-এর জন্য ব্যবহৃত হয়।
