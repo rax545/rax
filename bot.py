@@ -1,32 +1,74 @@
-import os
+"""LUNA GF Discord bot.
+
+The bot is interaction-first: members explicitly invoke chat, games and voice
+features, while scheduled DMs remain opt-in.  Optional AI/TTS providers make
+replies and voice more natural without preventing a local fallback from
+running.
+"""
+
+from __future__ import annotations
+
+import asyncio
 import logging
+import os
+from typing import Any
+
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
+
+from ai_provider import AIChatProvider
 from database import Database
-from personality import random_line, reply_line
+from games import random_quiz, truth_or_dare
+from mood import detect_mood, mood_label
+from personality import random_line, relationship_address, reply_line
+from relationship import conversation_deltas, game_deltas, progress_bar, relationship_stage
+from voice import VoiceService, VoiceUnavailable
+
 
 load_dotenv()
+
+
+def _int_env(name: str, default: int = 0) -> int:
+    try:
+        return int(os.getenv(name, str(default)) or default)
+    except ValueError:
+        return default
+
+
 TOKEN = os.getenv("DISCORD_TOKEN")
-GUILD_ID = int(os.getenv("GUILD_ID", "0") or 0)
-DEFAULT_INTERVAL = int(os.getenv("DM_INTERVAL_MINUTES", "180"))
-MAX_DAILY_DMS = int(os.getenv("MAX_DAILY_DMS", "2"))
+GUILD_ID = _int_env("GUILD_ID")
+MAX_DAILY_DMS = max(0, _int_env("MAX_DAILY_DMS", 2))
+RELATIONSHIP_DAILY_CAP = max(1, _int_env("RELATIONSHIP_DAILY_CAP", 40))
 DB_PATH = os.getenv("DATABASE_PATH", "data/luna_gf.sqlite3")
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
 log = logging.getLogger("luna-gf")
 
 intents = discord.Intents.default()
 intents.members = True
+# Message content is not needed: Luna responds to slash commands and voice
+# controls only.  This keeps the data boundary small.
 intents.message_content = False
 
+
 class LunaBot(commands.Bot):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__(command_prefix="!", intents=intents)
         self.db = Database(DB_PATH)
+        self.ai = AIChatProvider.from_env()
+        self.voice = VoiceService.from_env()
+        # Conversation text is held only in memory for the optional provider;
+        # it disappears on restart and can be cleared with /gf_forget.
+        self.chat_history: dict[tuple[int, int], list[dict[str, str]]] = {}
+        self.quiz_sessions: dict[tuple[int, int], dict[str, Any]] = {}
+        self._voice_tasks: set[asyncio.Task[Any]] = set()
 
-    async def setup_hook(self):
+    async def setup_hook(self) -> None:
         self.db.initialize()
         self.dm_scheduler.start()
         if GUILD_ID:
@@ -38,111 +80,707 @@ class LunaBot(commands.Bot):
             await self.tree.sync()
             log.info("Synced global commands")
 
-    async def close(self):
-        self.dm_scheduler.cancel()
+    async def close(self) -> None:
+        if self.dm_scheduler.is_running():
+            self.dm_scheduler.cancel()
+        for task in self._voice_tasks:
+            task.cancel()
         await super().close()
 
+    def history_for(self, guild_id: int, user_id: int) -> list[dict[str, str]]:
+        return list(self.chat_history.get((guild_id, user_id), []))
+
+    def remember(self, guild_id: int, user_id: int, user_message: str, answer: str) -> None:
+        key = (guild_id, user_id)
+        history = self.chat_history.setdefault(key, [])
+        history.extend(
+            [
+                {"role": "user", "content": user_message[:2000]},
+                {"role": "assistant", "content": answer[:3500]},
+            ]
+        )
+        del history[:-10]
+
+    def forget(self, guild_id: int, user_id: int) -> None:
+        self.chat_history.pop((guild_id, user_id), None)
+
+    def schedule_voice_reply(self, guild: discord.Guild, user_id: int, text: str) -> None:
+        member = guild.get_member(user_id)
+        voice_client = guild.voice_client
+        if not member or not member.voice or not voice_client or not voice_client.is_connected():
+            return
+        if member.voice.channel != voice_client.channel:
+            return
+
+        async def speak() -> None:
+            try:
+                await self.voice.speak(voice_client, text)
+            except (VoiceUnavailable, discord.ClientException, discord.HTTPException) as exc:
+                log.info("Voice reply skipped for %s: %s", user_id, exc)
+
+        task = asyncio.create_task(speak())
+        self._voice_tasks.add(task)
+        task.add_done_callback(self._voice_tasks.discard)
+
     @tasks.loop(minutes=5)
-    async def dm_scheduler(self):
-        # DM only members who explicitly opted in; enforce per-user daily cap.
+    async def dm_scheduler(self) -> None:
+        """Send occasional playful DMs only to explicit opt-ins."""
+
+        if MAX_DAILY_DMS <= 0:
+            return
         for guild in self.guilds:
             rows = self.db.get_opted_in(guild.id)
             for row in rows:
-                user_id = row["user_id"]
+                user_id = int(row["user_id"])
                 if self.db.dm_count_today(user_id) >= MAX_DAILY_DMS:
                     continue
                 member = guild.get_member(user_id)
                 if member is None or member.bot:
                     continue
                 try:
-                    await member.send(random_line())
+                    await member.send(random_line(), allowed_mentions=discord.AllowedMentions.none())
                     self.db.log_dm(user_id)
-                    await discord.utils.sleep_until(discord.utils.utcnow() + discord.timedelta(seconds=2))
+                    await asyncio.sleep(2)
                 except (discord.Forbidden, discord.HTTPException):
                     log.info("Could not DM user %s; leaving opt-in unchanged", user_id)
 
     @dm_scheduler.before_loop
-    async def before_dm_scheduler(self):
+    async def before_dm_scheduler(self) -> None:
         await self.wait_until_ready()
 
+
 bot = LunaBot()
+
 
 def is_admin(interaction: discord.Interaction) -> bool:
     return bool(interaction.guild and interaction.user.guild_permissions.manage_guild)
 
+
+def guild_id_for(interaction: discord.Interaction) -> int:
+    # A zero scope is used for a DM chat profile; all relationship/game/voice
+    # commands explicitly require a real guild.
+    return int(interaction.guild_id or 0)
+
+
+def require_guild(interaction: discord.Interaction) -> str | None:
+    if not interaction.guild or not interaction.guild_id:
+        return "এই feature-টি Discord server-এ ব্যবহার করো, DM-এ নয়। 💗"
+    return None
+
+
 @bot.event
-async def on_ready():
-    log.info("Logged in as %s (%s)", bot.user, bot.user.id)
+async def on_ready() -> None:
+    if bot.user:
+        log.info("Logged in as %s (%s)", bot.user, bot.user.id)
     await bot.change_presence(activity=discord.Game(name="being your chaotic GF 💗"))
 
+
+# ---------------------------------------------------------------------------
+# Consent and chat
+# ---------------------------------------------------------------------------
 @bot.tree.command(name="gf_optin", description="Allow Luna to send you occasional funny DMs.")
-async def gf_optin(interaction: discord.Interaction):
+async def gf_optin(interaction: discord.Interaction) -> None:
     if not interaction.guild:
-        return await interaction.response.send_message("Use this command in the server where Luna is installed.", ephemeral=True)
+        await interaction.response.send_message(
+            "Use this command in the server where Luna is installed.", ephemeral=True
+        )
+        return
     bot.db.set_optin(interaction.user.id, interaction.guild.id, True)
-    await interaction.response.send_message("💗 You're opted in! Luna may send you occasional playful DMs. Use `/gf_optout` anytime.", ephemeral=True)
+    await interaction.response.send_message(
+        "💗 You're opted in! Luna may send occasional playful DMs. Use `/gf_optout` anytime.",
+        ephemeral=True,
+    )
+
 
 @bot.tree.command(name="gf_optout", description="Stop all scheduled DMs from Luna.")
-async def gf_optout(interaction: discord.Interaction):
+async def gf_optout(interaction: discord.Interaction) -> None:
     if interaction.guild:
         bot.db.set_optin(interaction.user.id, interaction.guild.id, False)
     await interaction.response.send_message("Done — scheduled DMs are off. 💗", ephemeral=True)
 
-@bot.tree.command(name="gf_chat", description="Chat with Luna's mixed cute/savage personality.")
-@app_commands.describe(message="Say something to Luna")
-async def gf_chat(interaction: discord.Interaction, message: str):
-    if len(message) > 500:
-        return await interaction.response.send_message("Keep it under 500 characters, bestie 😭", ephemeral=True)
-    await interaction.response.send_message(reply_line(message), ephemeral=False)
 
+@bot.tree.command(name="gf_chat", description="Chat with Luna's mood-aware AI companion.")
+@app_commands.describe(message="Say something to Luna")
+async def gf_chat(interaction: discord.Interaction, message: str) -> None:
+    if not message.strip():
+        await interaction.response.send_message("একটা কথা বলো, আমি শুনছি। 💗", ephemeral=True)
+        return
+    if len(message) > 500:
+        await interaction.response.send_message(
+            "Keep it under 500 characters, bestie 😭", ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(thinking=True)
+    scope_id = guild_id_for(interaction)
+    mood = detect_mood(message)
+    friendship_delta, affection_delta = conversation_deltas(mood)
+    profile = bot.db.record_conversation(
+        interaction.user.id,
+        scope_id,
+        mood=mood.mood,
+        mood_confidence=mood.confidence,
+        friendship_delta=friendship_delta,
+        affection_delta=affection_delta,
+        daily_cap=RELATIONSHIP_DAILY_CAP,
+    )
+    nickname = bot.db.get_nickname(interaction.user.id, scope_id)
+    history = bot.history_for(scope_id, interaction.user.id)
+
+    answer = await bot.ai.reply(
+        message=message,
+        nickname=nickname,
+        mood=mood.mood,
+        response_style=mood.response_style,
+        friendship=float(profile["friendship_score"]),
+        affection=float(profile["affection_score"]),
+        history=history,
+    )
+    if not answer:
+        answer = reply_line(message, nickname=nickname, mood=mood)
+    bot.remember(scope_id, interaction.user.id, message, answer)
+
+    # Mentions in provider/local text are always neutralised so a playful AI
+    # cannot mass-ping a server by accident.
+    await interaction.followup.send(
+        answer,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+    if (
+        interaction.guild
+        and bot.db.voice_mode(interaction.user.id, interaction.guild.id)
+        and interaction.guild.voice_client
+    ):
+        bot.schedule_voice_reply(interaction.guild, interaction.user.id, answer)
+
+
+@bot.tree.command(name="gf_mood", description="See Luna's latest mood reading for your conversation.")
+async def gf_mood(interaction: discord.Interaction) -> None:
+    scope_id = guild_id_for(interaction)
+    profile = bot.db.get_profile(interaction.user.id, scope_id)
+    if not profile:
+        await interaction.response.send_message(
+            "এখনও কোনো mood signal নেই—`/gf_chat`-এ কিছু বলো। 🙂", ephemeral=True
+        )
+        return
+    label = mood_label(profile["current_mood"], float(profile["mood_confidence"]))
+    await interaction.response.send_message(
+        f"Luna এখন তোমার কথার জন্য **{label}** style ব্যবহার করছে।\n"
+        "এটা শুধু conversation style signal—কোনো diagnosis নয়।",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="gf_forget", description="Clear Luna's in-memory chat context for you.")
+async def gf_forget(interaction: discord.Interaction) -> None:
+    bot.forget(guild_id_for(interaction), interaction.user.id)
+    await interaction.response.send_message(
+        "Done — Luna's temporary chat context for you is cleared. 💗", ephemeral=True
+    )
+
+
+# ---------------------------------------------------------------------------
+# Personalized identity and daily relationship level
+# ---------------------------------------------------------------------------
+@bot.tree.command(name="gf_nickname", description="Set or view your personal Luna nickname.")
+@app_commands.describe(nickname="A nickname up to 32 characters; leave blank to view it")
+async def gf_nickname(interaction: discord.Interaction, nickname: str | None = None) -> None:
+    error = require_guild(interaction)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
+        return
+    assert interaction.guild_id is not None
+    if nickname is None:
+        current = bot.db.get_nickname(interaction.user.id, interaction.guild_id)
+        await interaction.response.send_message(
+            f"তোমার Luna nickname: **{current or 'not set'}**\n"
+            "বদলাতে `/gf_nickname nickname:...` ব্যবহার করো।",
+            ephemeral=True,
+        )
+        return
+
+    clean = " ".join(nickname.split()).strip()
+    if not clean or len(clean) > 32 or "@everyone" in clean.lower() or "@here" in clean.lower():
+        await interaction.response.send_message(
+            "Nickname 1–32 characters-এর হতে হবে এবং mention থাকতে পারবে না।", ephemeral=True
+        )
+        return
+    bot.db.set_nickname(interaction.user.id, interaction.guild_id, clean)
+    await interaction.response.send_message(
+        f"ঠিক আছে, {clean}—এখন থেকে এই server-এ Luna তোমাকে এই nickname-এ ডাকবে। 💗",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="gf_nickname_clear", description="Remove your personal Luna nickname.")
+async def gf_nickname_clear(interaction: discord.Interaction) -> None:
+    error = require_guild(interaction)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
+        return
+    assert interaction.guild_id is not None
+    bot.db.set_nickname(interaction.user.id, interaction.guild_id, None)
+    await interaction.response.send_message("Nickname cleared — default display name ফিরে এসেছে।", ephemeral=True)
+
+
+async def send_relationship(interaction: discord.Interaction) -> None:
+    error = require_guild(interaction)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
+        return
+    assert interaction.guild_id is not None
+    profile = bot.db.get_relationship(interaction.user.id, interaction.guild_id)
+    stage, explanation, score = relationship_stage(
+        profile["friendship_score"], profile["affection_score"]
+    )
+    daily = profile["daily"]
+    nickname = relationship_address(profile.get("nickname"), interaction.user.display_name)
+    embed = discord.Embed(
+        title=f"💗 {nickname}'s Daily Relationship Level",
+        description=(
+            f"**{stage}** · {score:.0f}/100\n{explanation}\n\n"
+            "এটি কথোপকথন ও game participation-এর fictional progress meter—বাস্তব commitment নয়।"
+        ),
+        colour=discord.Colour.from_rgb(242, 125, 168),
+    )
+    embed.add_field(
+        name="Friendship",
+        value=f"{progress_bar(profile['friendship_score'])} {profile['friendship_score']:.1f}/100",
+        inline=False,
+    )
+    embed.add_field(
+        name="Affection",
+        value=f"{progress_bar(profile['affection_score'])} {profile['affection_score']:.1f}/100",
+        inline=False,
+    )
+    embed.add_field(
+        name="Today",
+        value=(
+            f"{daily['conversation_count']} chats · {daily['game_count']} games\n"
+            f"+{daily['friendship_points']:.1f} friendship · +{daily['affection_points']:.1f} affection"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text=f"Active streak: {profile['streak_days']} day(s) · Scores are capped daily")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="gf_relationship", description="See your friendship and affection progress with Luna.")
+async def gf_relationship(interaction: discord.Interaction) -> None:
+    await send_relationship(interaction)
+
+
+@bot.tree.command(name="gf_daily_relationship", description="See today's Luna relationship summary.")
+async def gf_daily_relationship(interaction: discord.Interaction) -> None:
+    await send_relationship(interaction)
+
+
+@bot.tree.command(name="gf_delete_data", description="Delete your Luna profile and relationship data here.")
+@app_commands.describe(confirm="Set true to permanently delete this server profile")
+async def gf_delete_data(interaction: discord.Interaction, confirm: bool) -> None:
+    error = require_guild(interaction)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
+        return
+    if not confirm:
+        await interaction.response.send_message(
+            "No data was deleted. Run `/gf_delete_data confirm:true` if you really want to erase it.",
+            ephemeral=True,
+        )
+        return
+    assert interaction.guild_id is not None
+    bot.db.delete_user_data(interaction.user.id, interaction.guild_id)
+    bot.forget(interaction.guild_id, interaction.user.id)
+    bot.quiz_sessions.pop((interaction.guild_id, interaction.user.id), None)
+    await interaction.response.send_message(
+        "তোমার Luna profile, relationship stats, nickname, voice preference এবং DM opt-in মুছে দেওয়া হয়েছে।",
+        ephemeral=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Couple games
+# ---------------------------------------------------------------------------
+@bot.tree.command(name="gf_truth_or_dare", description="Play a safe Truth or Dare round with Luna.")
+@app_commands.describe(mode="Choose truth, dare, or let Luna pick")
+@app_commands.choices(
+    mode=[
+        app_commands.Choice(name="Random", value="random"),
+        app_commands.Choice(name="Truth", value="truth"),
+        app_commands.Choice(name="Dare", value="dare"),
+    ]
+)
+async def gf_truth_or_dare(
+    interaction: discord.Interaction,
+    mode: app_commands.Choice[str] | None = None,
+) -> None:
+    error = require_guild(interaction)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
+        return
+    assert interaction.guild_id is not None
+    kind, prompt = truth_or_dare(mode.value if mode else "random")
+    bot.db.record_game(
+        interaction.user.id,
+        interaction.guild_id,
+        friendship_delta=game_deltas()[0],
+        affection_delta=game_deltas()[1],
+        daily_cap=RELATIONSHIP_DAILY_CAP,
+    )
+    title = "Truth" if kind == "truth" else "Dare"
+    await interaction.response.send_message(
+        f"**💞 {title}**\n{prompt}\n\n*Skip or change the prompt anytime—no pressure, no unsafe proof needed.*",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+class QuizView(discord.ui.View):
+    def __init__(self, owner_id: int, guild_id: int, question: dict[str, Any]) -> None:
+        super().__init__(timeout=90)
+        self.owner_id = owner_id
+        self.guild_id = guild_id
+        self.question = question
+        self.message: discord.Message | None = None
+
+        for index, choice in enumerate(question["choices"]):
+            button = discord.ui.Button(
+                label=f"{index + 1}. {choice}"[:80],
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"luna-quiz-{owner_id}-{index}",
+            )
+
+            async def callback(
+                button_interaction: discord.Interaction,
+                selected: int = index,
+            ) -> None:
+                await self.answer(button_interaction, selected)
+
+            button.callback = callback
+            self.add_item(button)
+
+    async def answer(self, interaction: discord.Interaction, selected: int) -> None:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "এই quiz round-টা অন্য member-এর—নিজের round শুরু করো। 🙂", ephemeral=True
+            )
+            return
+        if interaction.guild_id != self.guild_id:
+            await interaction.response.send_message("এই quiz round-এর server scope মেলেনি।", ephemeral=True)
+            return
+
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        bot.quiz_sessions.pop((self.guild_id, self.owner_id), None)
+        correct = selected == int(self.question["answer"])
+        friendship, affection = game_deltas(correct)
+        bot.db.record_game(
+            self.owner_id,
+            self.guild_id,
+            friendship_delta=friendship,
+            affection_delta=affection,
+            daily_cap=RELATIONSHIP_DAILY_CAP,
+        )
+        if correct:
+            result = f"✅ Correct! {self.question['explanation']}\n+{affection:.2f} affection game points 💗"
+        else:
+            result = (
+                f"Not this time 🙂 The answer was **{int(self.question['answer']) + 1}. "
+                f"{self.question['choices'][int(self.question['answer'])]}**.\n"
+                f"{self.question['explanation']}"
+            )
+        await interaction.response.edit_message(
+            content=result,
+            embed=None,
+            view=self,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        self.stop()
+
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(content="Quiz expired—চাইলে `/gf_quiz` দিয়ে নতুন round শুরু করো।", view=self)
+            except discord.HTTPException:
+                pass
+
+
+@bot.tree.command(name="gf_quiz", description="Start a fun Luna quiz round.")
+async def gf_quiz(interaction: discord.Interaction) -> None:
+    error = require_guild(interaction)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
+        return
+    assert interaction.guild_id is not None
+    question = random_quiz()
+    bot.quiz_sessions[(interaction.guild_id, interaction.user.id)] = question
+    embed = discord.Embed(
+        title="🧠 Luna Couple Quiz",
+        description=f"**{question['question']}**\n\nChoose one answer:",
+        colour=discord.Colour.blurple(),
+    )
+    view = QuizView(interaction.user.id, interaction.guild_id, question)
+    await interaction.response.send_message(embed=embed, view=view)
+    view.message = await interaction.original_response()
+
+
+@bot.tree.command(name="gf_quiz_answer", description="Answer your active Luna quiz using option number 1–4.")
+@app_commands.describe(answer="The number shown before your chosen answer")
+async def gf_quiz_answer(interaction: discord.Interaction, answer: int) -> None:
+    error = require_guild(interaction)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
+        return
+    assert interaction.guild_id is not None
+    question = bot.quiz_sessions.get((interaction.guild_id, interaction.user.id))
+    if not question:
+        await interaction.response.send_message(
+            "তোমার active quiz নেই—আগে `/gf_quiz` চালাও।", ephemeral=True
+        )
+        return
+    if answer < 1 or answer > len(question["choices"]):
+        await interaction.response.send_message("Option number ঠিক করে 1–4-এর মধ্যে দাও।", ephemeral=True)
+        return
+    bot.quiz_sessions.pop((interaction.guild_id, interaction.user.id), None)
+    correct = answer - 1 == int(question["answer"])
+    friendship, affection = game_deltas(correct)
+    bot.db.record_game(
+        interaction.user.id,
+        interaction.guild_id,
+        friendship_delta=friendship,
+        affection_delta=affection,
+        daily_cap=RELATIONSHIP_DAILY_CAP,
+    )
+    text = (
+        f"✅ Correct! {question['explanation']}"
+        if correct
+        else f"Not quite 🙂 Correct answer: **{int(question['answer']) + 1}. {question['choices'][int(question['answer'])]}**\n{question['explanation']}"
+    )
+    await interaction.response.send_message(text, allowed_mentions=discord.AllowedMentions.none())
+
+
+# ---------------------------------------------------------------------------
+# Discord Voice GF
+# ---------------------------------------------------------------------------
+def member_voice_channel(interaction: discord.Interaction) -> discord.abc.GuildChannel | None:
+    member = interaction.user if isinstance(interaction.user, discord.Member) else None
+    return member.voice.channel if member and member.voice else None
+
+
+async def connect_to_member_voice(interaction: discord.Interaction) -> discord.VoiceClient:
+    if not interaction.guild:
+        raise VoiceUnavailable("Voice commands need a server")
+    channel = member_voice_channel(interaction)
+    if channel is None:
+        raise VoiceUnavailable("আগে একটি Discord voice channel-এ join করো")
+    voice_client = interaction.guild.voice_client
+    if voice_client and voice_client.is_connected():
+        if voice_client.channel != channel:
+            await voice_client.move_to(channel)
+        return voice_client
+    return await channel.connect(self_deaf=False)
+
+
+@bot.tree.command(name="gf_voice_join", description="Join your current Discord voice channel as Luna.")
+async def gf_voice_join(interaction: discord.Interaction) -> None:
+    error = require_guild(interaction)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        voice_client = await connect_to_member_voice(interaction)
+        channel_name = getattr(voice_client.channel, "name", "your VC")
+        await interaction.followup.send(
+            f"🎙️ Luna joined **{channel_name}**. `/gf_voice_say` দিয়ে কথা বলাও, অথবা `/gf_voice_mode enabled:true` করো।",
+            ephemeral=True,
+        )
+    except (VoiceUnavailable, discord.ClientException, discord.Forbidden, discord.HTTPException) as exc:
+        await interaction.followup.send(f"Voice join হয়নি: {exc}", ephemeral=True)
+
+
+@bot.tree.command(name="gf_voice_leave", description="Disconnect Luna from the current voice channel.")
+async def gf_voice_leave(interaction: discord.Interaction) -> None:
+    error = require_guild(interaction)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
+        return
+    assert interaction.guild is not None
+    voice_client = interaction.guild.voice_client
+    if not voice_client:
+        await interaction.response.send_message("Luna কোনো voice channel-এ নেই।", ephemeral=True)
+        return
+    voice_client.stop()
+    await voice_client.disconnect(force=True)
+    await interaction.response.send_message("👋 Luna voice channel থেকে বেরিয়ে গেল।", ephemeral=True)
+
+
+@bot.tree.command(name="gf_voice_say", description="Make Luna say a short message in Discord VC.")
+@app_commands.describe(text="What Luna should say, up to 500 characters")
+async def gf_voice_say(interaction: discord.Interaction, text: str) -> None:
+    error = require_guild(interaction)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
+        return
+    if not text.strip() or len(text) > 500:
+        await interaction.response.send_message("Text 1–500 characters-এর মধ্যে দাও।", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        voice_client = interaction.guild.voice_client if interaction.guild else None
+        if not voice_client or not voice_client.is_connected():
+            voice_client = await connect_to_member_voice(interaction)
+        elif member_voice_channel(interaction) != voice_client.channel:
+            await interaction.followup.send("তুমি Luna-র বর্তমান VC-তে নেই।", ephemeral=True)
+            return
+        await bot.voice.speak(voice_client, text)
+        await interaction.followup.send("🔊 বলা হচ্ছে…", ephemeral=True)
+    except (VoiceUnavailable, discord.ClientException, discord.Forbidden, discord.HTTPException) as exc:
+        await interaction.followup.send(
+            f"Luna কথা বলতে পারেনি: {exc}\nTTS setup-এর জন্য project spec দেখো।", ephemeral=True
+        )
+
+
+@bot.tree.command(name="gf_voice_mode", description="Toggle automatic spoken replies to your /gf_chat messages.")
+@app_commands.describe(enabled="Whether Luna should speak your chat replies in the VC")
+async def gf_voice_mode(interaction: discord.Interaction, enabled: bool) -> None:
+    error = require_guild(interaction)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
+        return
+    assert interaction.guild_id is not None
+    if enabled and not interaction.guild.voice_client:
+        await interaction.response.send_message(
+            "আগে `/gf_voice_join` দিয়ে Luna-কে VC-তে আনো।", ephemeral=True
+        )
+        return
+    bot.db.set_voice_mode(interaction.user.id, interaction.guild_id, enabled)
+    await interaction.response.send_message(
+        f"Automatic voice replies {'ON' if enabled else 'OFF'} for you. 🎙️", ephemeral=True
+    )
+
+
+@bot.tree.command(name="gf_voice_status", description="Show Luna's voice connection and TTS status.")
+async def gf_voice_status(interaction: discord.Interaction) -> None:
+    error = require_guild(interaction)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
+        return
+    assert interaction.guild is not None and interaction.guild_id is not None
+    voice_client = interaction.guild.voice_client
+    status = bot.voice.status
+    connection = getattr(voice_client.channel, "name", "not connected") if voice_client else "not connected"
+    provider = "external API + local fallback" if status["external_configured"] else (
+        "local TTS" if status["local_configured"] else "not configured"
+    )
+    await interaction.response.send_message(
+        f"**VC:** {connection}\n**TTS:** {provider}\n"
+        f"**FFmpeg:** {'ready' if status['ffmpeg_configured'] else 'missing'}\n"
+        f"**Your auto voice:** {'ON' if bot.db.voice_mode(interaction.user.id, interaction.guild_id) else 'OFF'}",
+        ephemeral=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Existing playful/admin tools
+# ---------------------------------------------------------------------------
 @bot.tree.command(name="gf_roast", description="Ask Luna for a playful roast in this channel.")
 @app_commands.describe(member="Optional member to roast (keep it friendly)")
-async def gf_roast(interaction: discord.Interaction, member: discord.Member | None = None):
+async def gf_roast(interaction: discord.Interaction, member: discord.Member | None = None) -> None:
     target = member or interaction.user
     if target.bot:
-        return await interaction.response.send_message("Bots don't have feelings... probably. 🤖", ephemeral=True)
-    await interaction.response.send_message(f"{target.mention} {random_line()}", allowed_mentions=discord.AllowedMentions(users=True))
+        await interaction.response.send_message("Bots don't have feelings... probably. 🤖")
+        return
+    await interaction.response.send_message(
+        f"{target.mention} {random_line()}",
+        allowed_mentions=discord.AllowedMentions(users=True),
+    )
 
-@bot.tree.command(name="gf_setchannel", description="Set the channel where Luna may post occasional roasts (admin only).")
+
+@bot.tree.command(name="gf_setchannel", description="Set Luna's optional roast channel (admin only).")
 @app_commands.describe(channel="The allowed roast channel")
-async def gf_setchannel(interaction: discord.Interaction, channel: discord.TextChannel):
+async def gf_setchannel(interaction: discord.Interaction, channel: discord.TextChannel) -> None:
     if not is_admin(interaction):
-        return await interaction.response.send_message("You need Manage Server permission.", ephemeral=True)
+        await interaction.response.send_message("You need Manage Server permission.", ephemeral=True)
+        return
+    assert interaction.guild_id is not None
     bot.db.set_channel(interaction.guild_id, channel.id)
-    await interaction.response.send_message(f"💗 Roast channel set to {channel.mention}. Use `/gf_channel on` to enable.", ephemeral=True)
+    await interaction.response.send_message(
+        f"💗 Roast channel set to {channel.mention}. Use `/gf_channel enabled:true` to enable.",
+        ephemeral=True,
+    )
+
 
 @bot.tree.command(name="gf_channel", description="Turn scheduled channel roasts on or off (admin only).")
 @app_commands.describe(enabled="Whether Luna should post in the configured channel")
-async def gf_channel(interaction: discord.Interaction, enabled: bool):
+async def gf_channel(interaction: discord.Interaction, enabled: bool) -> None:
     if not is_admin(interaction):
-        return await interaction.response.send_message("You need Manage Server permission.", ephemeral=True)
+        await interaction.response.send_message("You need Manage Server permission.", ephemeral=True)
+        return
+    assert interaction.guild_id is not None
     if enabled and not bot.db.get_channel(interaction.guild_id):
-        return await interaction.response.send_message("Set a channel first with `/gf_setchannel`.", ephemeral=True)
+        await interaction.response.send_message(
+            "Set a channel first with `/gf_setchannel`.", ephemeral=True
+        )
+        return
     bot.db.set_channel_enabled(interaction.guild_id, enabled)
-    await interaction.response.send_message(f"Channel roasts {'enabled' if enabled else 'disabled'} 💗", ephemeral=True)
+    await interaction.response.send_message(
+        f"Channel roasts {'enabled' if enabled else 'disabled'} 💗", ephemeral=True
+    )
+
 
 @bot.tree.command(name="gf_post", description="Post one playful roast in the configured channel (admin only).")
-async def gf_post(interaction: discord.Interaction):
+async def gf_post(interaction: discord.Interaction) -> None:
     if not is_admin(interaction):
-        return await interaction.response.send_message("You need Manage Server permission.", ephemeral=True)
+        await interaction.response.send_message("You need Manage Server permission.", ephemeral=True)
+        return
+    assert interaction.guild is not None and interaction.guild_id is not None
     channel_id = bot.db.get_channel(interaction.guild_id)
     channel = interaction.guild.get_channel(channel_id) if channel_id else None
     if not isinstance(channel, discord.TextChannel):
-        return await interaction.response.send_message("Configure a valid channel first with `/gf_setchannel`.", ephemeral=True)
+        await interaction.response.send_message(
+            "Configure a valid channel first with `/gf_setchannel`.", ephemeral=True
+        )
+        return
     await channel.send(random_line(), allowed_mentions=discord.AllowedMentions.none())
     await interaction.response.send_message(f"Posted in {channel.mention} 💗", ephemeral=True)
 
-@bot.tree.command(name="gf_status", description="Show your Luna DM settings and server channel status.")
-async def gf_status(interaction: discord.Interaction):
+
+@bot.tree.command(name="gf_status", description="Show your Luna profile and server settings.")
+async def gf_status(interaction: discord.Interaction) -> None:
+    scope_id = guild_id_for(interaction)
+    profile = bot.db.get_profile(interaction.user.id, scope_id)
     opted = bot.db.is_opted_in(interaction.user.id, interaction.guild_id) if interaction.guild_id else False
     channel_id = bot.db.get_channel(interaction.guild_id) if interaction.guild_id else None
     enabled = bot.db.channel_enabled(interaction.guild_id) if interaction.guild_id else False
     channel_text = f"<#{channel_id}>" if channel_id else "not configured"
+    if profile:
+        stage, _, score = relationship_stage(profile["friendship_score"], profile["affection_score"])
+        profile_text = (
+            f"**Nickname:** {profile.get('nickname') or 'not set'}\n"
+            f"**Relationship:** {stage} ({score:.0f}/100)\n"
+            f"**Latest mood:** {mood_label(profile['current_mood'], profile['mood_confidence'])}"
+        )
+    else:
+        profile_text = "No profile activity yet."
     await interaction.response.send_message(
-        f"**Your DM opt-in:** {'ON' if opted else 'OFF'}\n**Server roast channel:** {channel_text}\n**Scheduled channel roasts:** {'ON' if enabled else 'OFF'}",
-        ephemeral=True
+        f"{profile_text}\n\n"
+        f"**Your DM opt-in:** {'ON' if opted else 'OFF'}\n"
+        f"**Server roast channel:** {channel_text}\n"
+        f"**Scheduled channel roasts:** {'ON' if enabled else 'OFF'}",
+        ephemeral=True,
     )
 
-if not TOKEN:
-    raise RuntimeError("DISCORD_TOKEN is missing. Copy .env.example to .env and add your bot token.")
-bot.run(TOKEN)
+
+async def main() -> None:
+    if not TOKEN:
+        raise RuntimeError("DISCORD_TOKEN is missing. Copy .env.example to .env and add your bot token.")
+    await bot.start(TOKEN)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

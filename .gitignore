@@ -1,0 +1,15 @@
+# Local secrets and runtime persistence
+.env
+data/*.sqlite3
+data/voice_cache/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# OS/editor files
+.DS_Store
+.vscode/
