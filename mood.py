@@ -52,6 +52,8 @@ _KEYWORDS: dict[str, tuple[str, ...]] = {
     "romantic": (
         "ভালোবাসি",
         "ভালবাসি",
+        "ভালোবাসো",
+        "ভালবাসো",
         "ভালোবাসা",
         "ভালবাসা",
         "love",
@@ -65,6 +67,12 @@ _KEYWORDS: dict[str, tuple[str, ...]] = {
         "কিউট",
         "cute",
         "sweet",
+        "ভালো লাগে",
+        "ভাল লাগে",
+        "like you",
+        "adore",
+        "crush",
+        "attracted",
     ),
     "sad": (
         "মন খারাপ",
@@ -82,6 +90,11 @@ _KEYWORDS: dict[str, tuple[str, ...]] = {
         "lonely",
         "depressed",
         "নিরাশ",
+        "bad day",
+        "rough day",
+        "terrible day",
+        "খারাপ দিন",
+        "দিনটা খারাপ",
     ),
     "stressed": (
         "চাপ",

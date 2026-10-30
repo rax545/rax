@@ -11,7 +11,7 @@ LUNA GF হলো Bangla + English mixed একটি **transparent AI companion
 - **Couple Games:** safe/skippable `/gf_truth_or_dare` এবং button-based `/gf_quiz` (`/gf_quiz_answer` text fallback)।
 - **Daily Relationship Level:** `/gf_relationship` — friendship, affection, daily activity, stage ও streak; points capped এবং fictional progress meter।
 - **Personalized Nickname:** `/gf_nickname`, `/gf_nickname_clear` — প্রত্যেক member-এর জন্য server-scoped আলাদা nickname।
-- **Optional real AI replies:** `AI_API_KEY` দিলে OpenAI-compatible Chat Completions ব্যবহার করে আরও natural reply; key না থাকলে local Bangla fallback কাজ করে।
+- **Optional real AI replies:** `AI_API_KEY` দিলে OpenAI-compatible Chat Completions ব্যবহার করে truly open-ended, context-aware reply; key না থাকলেও improved local fallback common GF conversations বুঝে reply করে। `/gf_status`-এ active reply engine দেখা যাবে।
 - **18+ Hotness System:** `/gf_age_confirm`, `/gf_hotness`, `/gf_hotmode`, `/gf_flirt`, `/gf_latenight`, `/gf_jealous`, `/gf_hot_truth_or_dare`, `/gf_couple_question` — explicit opt-in mature flirting, spicy-but-non-graphic compliments, playful jealousy এবং late-night romance। `/gf_boundary` ও `/gf_hot_stop` সঙ্গে সঙ্গে tone soft করে।
 - Existing opt-in scheduled DMs, roasts, admin channel settings এবং SQLite persistence রাখা হয়েছে।
 

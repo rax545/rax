@@ -33,7 +33,7 @@ from hotness import (
     sanitise_provider_reply,
 )
 from mood import detect_mood, mood_label
-from personality import random_line, relationship_address, reply_line
+from personality import random_line, relationship_address, reply_line, scheduled_line
 from relationship import conversation_deltas, game_deltas, progress_bar, relationship_stage
 from voice import VoiceService, VoiceUnavailable
 
@@ -149,7 +149,11 @@ class LunaBot(commands.Bot):
                 if member is None or member.bot:
                     continue
                 try:
-                    await member.send(random_line(), allowed_mentions=discord.AllowedMentions.none())
+                    nickname = self.db.get_nickname(user_id, guild.id)
+                    await member.send(
+                        scheduled_line(nickname),
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
                     self.db.log_dm(user_id)
                     await asyncio.sleep(2)
                 except (discord.Forbidden, discord.HTTPException):
@@ -243,6 +247,8 @@ async def generate_hot_reply(
 async def on_ready() -> None:
     if bot.user:
         log.info("Logged in as %s (%s)", bot.user, bot.user.id)
+    if not bot.ai.enabled:
+        log.warning("AI_API_KEY is not configured; /gf_chat is using Luna's local conversation fallback")
     await bot.change_presence(activity=discord.Game(name="being your chaotic GF 💗"))
 
 
@@ -339,7 +345,7 @@ async def gf_chat(interaction: discord.Interaction, message: str) -> None:
                 mood=mood,
             )
         else:
-            answer = reply_line(message, nickname=nickname, mood=mood)
+            answer = reply_line(message, nickname=nickname, mood=mood, history=history)
     if hot_active:
         answer = sanitise_provider_reply(
             answer,
@@ -1170,7 +1176,9 @@ async def gf_status(interaction: discord.Interaction) -> None:
     opted = bot.db.is_opted_in(interaction.user.id, interaction.guild_id) if interaction.guild_id else False
     channel_id = bot.db.get_channel(interaction.guild_id) if interaction.guild_id else None
     enabled = bot.db.channel_enabled(interaction.guild_id) if interaction.guild_id else False
+    hot_state = bot.db.get_hotness(interaction.user.id, scope_id)
     channel_text = f"<#{channel_id}>" if channel_id else "not configured"
+    ai_mode = "Real AI provider" if bot.ai.enabled else "Local fallback — set AI_API_KEY for open-ended AI replies"
     if profile:
         stage, _, score = relationship_stage(profile["friendship_score"], profile["affection_score"])
         profile_text = (
@@ -1184,7 +1192,9 @@ async def gf_status(interaction: discord.Interaction) -> None:
         f"{profile_text}\n\n"
         f"**Your DM opt-in:** {'ON' if opted else 'OFF'}\n"
         f"**Server roast channel:** {channel_text}\n"
-        f"**Scheduled channel roasts:** {'ON' if enabled else 'OFF'}",
+        f"**Scheduled channel roasts:** {'ON' if enabled else 'OFF'}\n"
+        f"**Reply engine:** {ai_mode}\n"
+        f"**Hot mode:** {'ON' if hot_state['enabled'] else 'OFF'}",
         ephemeral=True,
     )
 

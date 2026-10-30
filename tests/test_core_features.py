@@ -6,6 +6,7 @@ from database import Database
 from games import truth_or_dare
 from hotness import boundary_signal, contains_explicit_marker, flirt_reply, hot_truth_or_dare
 from mood import detect_mood
+from personality import reply_line, scheduled_line
 from relationship import conversation_deltas, relationship_stage
 
 
@@ -67,6 +68,13 @@ class CoreFeatureTests(unittest.TestCase):
             database.set_hotness_boundary(11, 22, "soft")
             self.assertEqual(database.get_hotness(11, 22)["boundary_mode"], "soft")
             self.assertEqual(database.get_hotness(11, 22)["enabled"], 0)
+
+    def test_local_fallback_is_contextual_and_personal(self):
+        greeting = reply_line("hi", nickname="Mahi")
+        check_in = reply_line("how are you", nickname="Mahi")
+        self.assertIn("Mahi", greeting)
+        self.assertIn("সত্যি করে", check_in)
+        self.assertIn("Mahi", scheduled_line("Mahi"))
 
 
 if __name__ == "__main__":
