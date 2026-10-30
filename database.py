@@ -91,6 +91,18 @@ class Database:
                     PRIMARY KEY(user_id, guild_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS hotness_preferences (
+                    user_id INTEGER NOT NULL,
+                    guild_id INTEGER NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    level INTEGER NOT NULL DEFAULT 1,
+                    age_confirmed INTEGER NOT NULL DEFAULT 0,
+                    jealous_enabled INTEGER NOT NULL DEFAULT 0,
+                    boundary_mode TEXT NOT NULL DEFAULT 'normal',
+                    updated_at TEXT,
+                    PRIMARY KEY(user_id, guild_id)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_dm_log_user_time
                     ON dm_log(user_id, sent_at);
                 CREATE INDEX IF NOT EXISTS idx_relationship_daily_day
@@ -399,6 +411,93 @@ class Database:
             ).fetchone()
             return bool(row and row["auto_reply"])
 
+    # ------------------------------------------------------------------
+    # Consent-gated mature-romance preferences
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _ensure_hotness(c: sqlite3.Connection, user_id: int, guild_id: int) -> None:
+        c.execute(
+            "INSERT OR IGNORE INTO hotness_preferences(user_id, guild_id) VALUES(?, ?)",
+            (user_id, guild_id),
+        )
+
+    def get_hotness(self, user_id: int, guild_id: int) -> dict[str, Any]:
+        defaults: dict[str, Any] = {
+            "user_id": user_id,
+            "guild_id": guild_id,
+            "enabled": 0,
+            "level": 1,
+            "age_confirmed": 0,
+            "jealous_enabled": 0,
+            "boundary_mode": "normal",
+            "updated_at": None,
+        }
+        with self.connect() as c:
+            row = c.execute(
+                "SELECT * FROM hotness_preferences WHERE user_id=? AND guild_id=?",
+                (user_id, guild_id),
+            ).fetchone()
+            if row:
+                defaults.update(dict(row))
+        return defaults
+
+    def set_age_confirmed(self, user_id: int, guild_id: int, confirmed: bool) -> None:
+        with self.connect() as c:
+            self._ensure_hotness(c, user_id, guild_id)
+            c.execute(
+                """UPDATE hotness_preferences SET age_confirmed=?, enabled=?,
+                    boundary_mode=?, updated_at=?
+                WHERE user_id=? AND guild_id=?""",
+                (
+                    int(confirmed),
+                    0,
+                    "normal" if confirmed else "stop",
+                    utc_now().isoformat(),
+                    user_id,
+                    guild_id,
+                ),
+            )
+
+    def set_hotness_enabled(self, user_id: int, guild_id: int, enabled: bool) -> None:
+        with self.connect() as c:
+            self._ensure_hotness(c, user_id, guild_id)
+            c.execute(
+                "UPDATE hotness_preferences SET enabled=?, updated_at=? WHERE user_id=? AND guild_id=?",
+                (int(enabled), utc_now().isoformat(), user_id, guild_id),
+            )
+
+    def set_hotness_level(self, user_id: int, guild_id: int, level: int) -> None:
+        with self.connect() as c:
+            self._ensure_hotness(c, user_id, guild_id)
+            c.execute(
+                "UPDATE hotness_preferences SET level=?, updated_at=? WHERE user_id=? AND guild_id=?",
+                (max(1, min(3, int(level))), utc_now().isoformat(), user_id, guild_id),
+            )
+
+    def set_jealous_mode(self, user_id: int, guild_id: int, enabled: bool) -> None:
+        with self.connect() as c:
+            self._ensure_hotness(c, user_id, guild_id)
+            c.execute(
+                "UPDATE hotness_preferences SET jealous_enabled=?, updated_at=? WHERE user_id=? AND guild_id=?",
+                (int(enabled), utc_now().isoformat(), user_id, guild_id),
+            )
+
+    def set_hotness_boundary(self, user_id: int, guild_id: int, mode: str) -> None:
+        mode = mode if mode in {"normal", "soft", "stop"} else "soft"
+        with self.connect() as c:
+            self._ensure_hotness(c, user_id, guild_id)
+            c.execute(
+                """UPDATE hotness_preferences SET boundary_mode=?, enabled=?, updated_at=?
+                WHERE user_id=? AND guild_id=?""",
+                (
+                    mode,
+                    0,
+                    utc_now().isoformat(),
+                    user_id,
+                    guild_id,
+                ),
+            )
+
     def delete_user_data(self, user_id: int, guild_id: int | None = None) -> None:
         with self.connect() as c:
             if guild_id is None:
@@ -406,6 +505,7 @@ class Database:
                 c.execute("DELETE FROM profiles WHERE user_id=?", (user_id,))
                 c.execute("DELETE FROM relationship_daily WHERE user_id=?", (user_id,))
                 c.execute("DELETE FROM voice_preferences WHERE user_id=?", (user_id,))
+                c.execute("DELETE FROM hotness_preferences WHERE user_id=?", (user_id,))
             else:
                 c.execute("DELETE FROM optins WHERE user_id=? AND guild_id=?", (user_id, guild_id))
                 c.execute("DELETE FROM profiles WHERE user_id=? AND guild_id=?", (user_id, guild_id))
@@ -415,6 +515,10 @@ class Database:
                 )
                 c.execute(
                     "DELETE FROM voice_preferences WHERE user_id=? AND guild_id=?",
+                    (user_id, guild_id),
+                )
+                c.execute(
+                    "DELETE FROM hotness_preferences WHERE user_id=? AND guild_id=?",
                     (user_id, guild_id),
                 )
             c.execute("DELETE FROM dm_log WHERE user_id=?", (user_id,))

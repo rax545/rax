@@ -21,6 +21,17 @@ from dotenv import load_dotenv
 from ai_provider import AIChatProvider
 from database import Database
 from games import random_quiz, truth_or_dare
+from hotness import (
+    access_reply,
+    boundary_reply,
+    boundary_signal,
+    couple_question,
+    flirt_reply,
+    hot_truth_or_dare,
+    hotness_label,
+    is_late_night,
+    sanitise_provider_reply,
+)
 from mood import detect_mood, mood_label
 from personality import random_line, relationship_address, reply_line
 from relationship import conversation_deltas, game_deltas, progress_bar, relationship_stage
@@ -168,6 +179,66 @@ def require_guild(interaction: discord.Interaction) -> str | None:
     return None
 
 
+def hot_state_for(interaction: discord.Interaction) -> dict[str, Any]:
+    return bot.db.get_hotness(interaction.user.id, guild_id_for(interaction))
+
+
+def hot_access_error(state: dict[str, Any]) -> str:
+    return access_reply(
+        age_confirmed=bool(state["age_confirmed"]),
+        enabled=bool(state["enabled"]),
+        boundary_mode=str(state["boundary_mode"]),
+    )
+
+
+async def generate_hot_reply(
+    interaction: discord.Interaction,
+    message: str,
+    *,
+    late_night: bool = False,
+) -> str:
+    """Generate a consent-gated mature-romance reply with a safe fallback."""
+
+    scope_id = guild_id_for(interaction)
+    state = hot_state_for(interaction)
+    mood = detect_mood(message or "ভালো লাগছে")
+    friendship_delta, affection_delta = conversation_deltas(mood)
+    profile = bot.db.record_conversation(
+        interaction.user.id,
+        scope_id,
+        mood=mood.mood,
+        mood_confidence=mood.confidence,
+        friendship_delta=friendship_delta,
+        affection_delta=affection_delta,
+        daily_cap=RELATIONSHIP_DAILY_CAP,
+    )
+    nickname = bot.db.get_nickname(interaction.user.id, scope_id)
+    fallback = flirt_reply(
+        message,
+        nickname=nickname,
+        level=int(state["level"]),
+        jealous=bool(state["jealous_enabled"]),
+        late_night=late_night,
+        mood=mood,
+    )
+    answer = await bot.ai.reply(
+        message=message or "Give me a tasteful, confident romantic compliment.",
+        nickname=nickname,
+        mood=mood.mood,
+        response_style=mood.response_style,
+        friendship=float(profile["friendship_score"]),
+        affection=float(profile["affection_score"]),
+        history=bot.history_for(scope_id, interaction.user.id),
+        hot_mode=True,
+        hotness_level=int(state["level"]),
+        jealous_mode=bool(state["jealous_enabled"]),
+        late_night=late_night,
+    )
+    answer = sanitise_provider_reply(answer or "", fallback)
+    bot.remember(scope_id, interaction.user.id, message or "late-night mode", answer)
+    return answer
+
+
 @bot.event
 async def on_ready() -> None:
     if bot.user:
@@ -213,6 +284,19 @@ async def gf_chat(interaction: discord.Interaction, message: str) -> None:
 
     await interaction.response.defer(thinking=True)
     scope_id = guild_id_for(interaction)
+    hot_state = hot_state_for(interaction)
+    boundary_phrase = boundary_signal(message)
+    if boundary_phrase and interaction.guild_id:
+        # A clear discomfort signal immediately disables mature tone for this
+        # member.  Re-enabling requires a deliberate hot-mode command.
+        bot.db.set_hotness_boundary(interaction.user.id, interaction.guild_id, "soft")
+        hot_state = hot_state_for(interaction)
+    hot_active = bool(
+        interaction.guild_id
+        and hot_state["age_confirmed"]
+        and hot_state["enabled"]
+        and hot_state["boundary_mode"] == "normal"
+    )
     mood = detect_mood(message)
     friendship_delta, affection_delta = conversation_deltas(mood)
     profile = bot.db.record_conversation(
@@ -227,17 +311,47 @@ async def gf_chat(interaction: discord.Interaction, message: str) -> None:
     nickname = bot.db.get_nickname(interaction.user.id, scope_id)
     history = bot.history_for(scope_id, interaction.user.id)
 
-    answer = await bot.ai.reply(
-        message=message,
-        nickname=nickname,
-        mood=mood.mood,
-        response_style=mood.response_style,
-        friendship=float(profile["friendship_score"]),
-        affection=float(profile["affection_score"]),
-        history=history,
-    )
+    answer = None
+    if not boundary_phrase:
+        answer = await bot.ai.reply(
+            message=message,
+            nickname=nickname,
+            mood=mood.mood,
+            response_style=mood.response_style,
+            friendship=float(profile["friendship_score"]),
+            affection=float(profile["affection_score"]),
+            history=history,
+            hot_mode=hot_active,
+            hotness_level=int(hot_state["level"]),
+            jealous_mode=bool(hot_state["jealous_enabled"]),
+            late_night=is_late_night(),
+        )
     if not answer:
-        answer = reply_line(message, nickname=nickname, mood=mood)
+        if boundary_phrase:
+            answer = boundary_reply()
+        elif hot_active:
+            answer = flirt_reply(
+                message,
+                nickname=nickname,
+                level=int(hot_state["level"]),
+                jealous=bool(hot_state["jealous_enabled"]),
+                late_night=is_late_night(),
+                mood=mood,
+            )
+        else:
+            answer = reply_line(message, nickname=nickname, mood=mood)
+    if hot_active:
+        answer = sanitise_provider_reply(
+            answer,
+            flirt_reply(
+                message,
+                nickname=nickname,
+                level=int(hot_state["level"]),
+                jealous=bool(hot_state["jealous_enabled"]),
+                late_night=is_late_night(),
+                mood=mood,
+            ),
+        )
     bot.remember(scope_id, interaction.user.id, message, answer)
 
     # Mentions in provider/local text are always neutralised so a playful AI
@@ -277,6 +391,305 @@ async def gf_forget(interaction: discord.Interaction) -> None:
     bot.forget(guild_id_for(interaction), interaction.user.id)
     await interaction.response.send_message(
         "Done — Luna's temporary chat context for you is cleared. 💗", ephemeral=True
+    )
+
+
+# ---------------------------------------------------------------------------
+# Consent-gated 18+ mature romance (non-graphic)
+# ---------------------------------------------------------------------------
+@bot.tree.command(name="gf_age_confirm", description="Confirm you are 18+ before using mature romance mode.")
+@app_commands.describe(confirm="Confirm that you are 18 or older")
+async def gf_age_confirm(interaction: discord.Interaction, confirm: bool) -> None:
+    error = require_guild(interaction)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
+        return
+    assert interaction.guild_id is not None
+    bot.db.set_age_confirmed(interaction.user.id, interaction.guild_id, confirm)
+    if confirm:
+        await interaction.response.send_message(
+            "18+ self-confirmation saved. This is not identity/age verification, and hot mode is still OFF until you explicitly enable it with `/gf_hotmode mode:on`.",
+            ephemeral=True,
+        )
+    else:
+        await interaction.response.send_message(
+            "Age confirmation removed and mature romance mode disabled. 💗", ephemeral=True
+        )
+
+
+@bot.tree.command(name="gf_hotness", description="View or set Luna's mature romance intensity.")
+@app_commands.describe(level="Warm, bold or spicy non-graphic romance")
+@app_commands.choices(
+    level=[
+        app_commands.Choice(name="Warm flirt", value="1"),
+        app_commands.Choice(name="Bold flirt", value="2"),
+        app_commands.Choice(name="Spicy romance", value="3"),
+    ]
+)
+async def gf_hotness(
+    interaction: discord.Interaction,
+    level: app_commands.Choice[str] | None = None,
+) -> None:
+    error = require_guild(interaction)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
+        return
+    assert interaction.guild_id is not None
+    if level:
+        bot.db.set_hotness_level(interaction.user.id, interaction.guild_id, int(level.value))
+    state = hot_state_for(interaction)
+    status = "ON" if state["enabled"] else "OFF"
+    jealous = "ON" if state["jealous_enabled"] else "OFF"
+    await interaction.response.send_message(
+        f"🔥 **Luna Hotness**\n"
+        f"Level: **{hotness_label(state['level'])}**\n"
+        f"Mode: **{status}** · Playful jealousy: **{jealous}**\n"
+        f"18+ confirmed: **{'YES' if state['age_confirmed'] else 'NO'}**\n"
+        f"Boundary state: **{state['boundary_mode']}**\n\n"
+        "এটি non-graphic mature romance; consent এবং comfort সবসময় আগে।",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="gf_hotmode", description="Turn consent-gated mature flirting on or off.")
+@app_commands.describe(mode="Explicitly enable or disable mature romance")
+@app_commands.choices(
+    mode=[
+        app_commands.Choice(name="On", value="on"),
+        app_commands.Choice(name="Off", value="off"),
+    ]
+)
+async def gf_hotmode(interaction: discord.Interaction, mode: app_commands.Choice[str]) -> None:
+    error = require_guild(interaction)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
+        return
+    assert interaction.guild_id is not None
+    if mode.value == "off":
+        bot.db.set_hotness_enabled(interaction.user.id, interaction.guild_id, False)
+        await interaction.response.send_message(
+            "🔥 Hot mode OFF. Luna এখন normal/soft tone-এ থাকবে।", ephemeral=True
+        )
+        return
+
+    state = hot_state_for(interaction)
+    if not state["age_confirmed"]:
+        await interaction.response.send_message(
+            access_reply(
+                age_confirmed=False,
+                enabled=False,
+                boundary_mode=str(state["boundary_mode"]),
+            ),
+            ephemeral=True,
+        )
+        return
+    if state["boundary_mode"] in {"soft", "stop"}:
+        await interaction.response.send_message(
+            access_reply(
+                age_confirmed=True,
+                enabled=False,
+                boundary_mode=str(state["boundary_mode"]),
+            ),
+            ephemeral=True,
+        )
+        return
+    bot.db.set_hotness_enabled(interaction.user.id, interaction.guild_id, True)
+    state = hot_state_for(interaction)
+    await interaction.response.send_message(
+        f"🔥 Hot mode ON — **{hotness_label(state['level'])}**. `/gf_flirt` বা `/gf_latenight` দিয়ে শুরু করো।",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="gf_jealous", description="Toggle Luna's playful, non-controlling jealousy teasing.")
+@app_commands.describe(mode="Turn playful jealousy on or off")
+@app_commands.choices(
+    mode=[
+        app_commands.Choice(name="On", value="on"),
+        app_commands.Choice(name="Off", value="off"),
+    ]
+)
+async def gf_jealous(interaction: discord.Interaction, mode: app_commands.Choice[str]) -> None:
+    error = require_guild(interaction)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
+        return
+    assert interaction.guild_id is not None
+    if mode.value == "on":
+        state = hot_state_for(interaction)
+        blocked = hot_access_error(state)
+        if blocked:
+            await interaction.response.send_message(blocked, ephemeral=True)
+            return
+    bot.db.set_jealous_mode(interaction.user.id, interaction.guild_id, mode.value == "on")
+    await interaction.response.send_message(
+        f"Playful jealousy {'ON' if mode.value == 'on' else 'OFF'} — Luna কখনো control বা isolation করবে না। 😌",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="gf_flirt", description="Start a consent-gated mature romantic flirt chat.")
+@app_commands.describe(message="Optional flirty topic, up to 500 characters")
+async def gf_flirt(interaction: discord.Interaction, message: str | None = None) -> None:
+    error = require_guild(interaction)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
+        return
+    state = hot_state_for(interaction)
+    blocked = hot_access_error(state)
+    if blocked:
+        await interaction.response.send_message(blocked, ephemeral=True)
+        return
+    if message and len(message) > 500:
+        await interaction.response.send_message("Message 500 characters-এর মধ্যে রাখো।", ephemeral=True)
+        return
+    prompt = message or "Give me a confident romantic compliment."
+    if boundary_signal(prompt):
+        assert interaction.guild_id is not None
+        bot.db.set_hotness_boundary(interaction.user.id, interaction.guild_id, "soft")
+        await interaction.response.send_message(boundary_reply(), ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    answer = await generate_hot_reply(interaction, prompt)
+    await interaction.followup.send(answer, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+
+@bot.tree.command(name="gf_latenight", description="Start a soft, intimate late-night romance conversation.")
+@app_commands.describe(message="Optional late-night topic, up to 500 characters")
+async def gf_latenight(interaction: discord.Interaction, message: str | None = None) -> None:
+    error = require_guild(interaction)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
+        return
+    state = hot_state_for(interaction)
+    blocked = hot_access_error(state)
+    if blocked:
+        await interaction.response.send_message(blocked, ephemeral=True)
+        return
+    if message and len(message) > 500:
+        await interaction.response.send_message("Message 500 characters-এর মধ্যে রাখো।", ephemeral=True)
+        return
+    prompt = message or "Start a gentle, intimate late-night conversation."
+    if boundary_signal(prompt):
+        assert interaction.guild_id is not None
+        bot.db.set_hotness_boundary(interaction.user.id, interaction.guild_id, "soft")
+        await interaction.response.send_message(boundary_reply(), ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    answer = await generate_hot_reply(interaction, prompt, late_night=True)
+    await interaction.followup.send(answer, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+
+@bot.tree.command(name="gf_hot_truth_or_dare", description="Play a safe, mature-romance Truth or Dare round.")
+@app_commands.describe(mode="Choose truth, dare, or let Luna pick")
+@app_commands.choices(
+    mode=[
+        app_commands.Choice(name="Random", value="random"),
+        app_commands.Choice(name="Truth", value="truth"),
+        app_commands.Choice(name="Dare", value="dare"),
+    ]
+)
+async def gf_hot_truth_or_dare(
+    interaction: discord.Interaction,
+    mode: app_commands.Choice[str] | None = None,
+) -> None:
+    error = require_guild(interaction)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
+        return
+    assert interaction.guild_id is not None
+    state = hot_state_for(interaction)
+    blocked = hot_access_error(state)
+    if blocked:
+        await interaction.response.send_message(blocked, ephemeral=True)
+        return
+    kind, prompt = hot_truth_or_dare(mode.value if mode else "random", int(state["level"]))
+    friendship, affection = game_deltas()
+    bot.db.record_game(
+        interaction.user.id,
+        interaction.guild_id,
+        friendship_delta=friendship,
+        affection_delta=affection,
+        daily_cap=RELATIONSHIP_DAILY_CAP,
+    )
+    await interaction.response.send_message(
+        f"**🔥 Mature {kind.title()}**\n{prompt}\n\n"
+        "*Skip, change the prompt, or use `/gf_hot_stop` anytime. No photos, proof, secrets or unsafe actions.*",
+        ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+@bot.tree.command(name="gf_couple_question", description="Get a mature but non-graphic couple question.")
+async def gf_couple_question(interaction: discord.Interaction) -> None:
+    error = require_guild(interaction)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
+        return
+    assert interaction.guild_id is not None
+    state = hot_state_for(interaction)
+    blocked = hot_access_error(state)
+    if blocked:
+        await interaction.response.send_message(blocked, ephemeral=True)
+        return
+    friendship, affection = game_deltas()
+    bot.db.record_game(
+        interaction.user.id,
+        interaction.guild_id,
+        friendship_delta=friendship,
+        affection_delta=affection,
+        daily_cap=RELATIONSHIP_DAILY_CAP,
+    )
+    await interaction.response.send_message(
+        f"**💗 Couple question**\n{couple_question(int(state['level']))}\n\n"
+        "*Answer only what feels comfortable; skip is always okay.*",
+        ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+@bot.tree.command(name="gf_boundary", description="Set or reset Luna's mature-romance boundary state.")
+@app_commands.describe(mode="Soft stops flirting; reset prepares for a deliberate re-enable")
+@app_commands.choices(
+    mode=[
+        app_commands.Choice(name="Soft / stop", value="soft"),
+        app_commands.Choice(name="Reset boundary", value="reset"),
+    ]
+)
+async def gf_boundary(interaction: discord.Interaction, mode: app_commands.Choice[str]) -> None:
+    error = require_guild(interaction)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
+        return
+    assert interaction.guild_id is not None
+    if mode.value == "soft":
+        bot.db.set_hotness_boundary(interaction.user.id, interaction.guild_id, "soft")
+        await interaction.response.send_message(boundary_reply(), ephemeral=True)
+        return
+    state = hot_state_for(interaction)
+    if not state["age_confirmed"]:
+        await interaction.response.send_message(
+            "Reset-এর আগে `/gf_age_confirm confirm:true` দরকার।", ephemeral=True
+        )
+        return
+    bot.db.set_hotness_boundary(interaction.user.id, interaction.guild_id, "normal")
+    await interaction.response.send_message(
+        "Boundary reset হয়েছে, কিন্তু hot mode এখনও OFF। চাইলে `/gf_hotmode mode:on` দিয়ে deliberate opt-in করো।",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="gf_hot_stop", description="Immediately stop all mature romance tone for you.")
+async def gf_hot_stop(interaction: discord.Interaction) -> None:
+    error = require_guild(interaction)
+    if error:
+        await interaction.response.send_message(error, ephemeral=True)
+        return
+    assert interaction.guild_id is not None
+    bot.db.set_hotness_boundary(interaction.user.id, interaction.guild_id, "stop")
+    await interaction.response.send_message(
+        "🛑 Hot mode immediately stopped. Luna এখন normal, respectful tone-এ থাকবে।",
+        ephemeral=True,
     )
 
 

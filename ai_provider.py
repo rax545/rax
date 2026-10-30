@@ -56,15 +56,28 @@ class AIChatProvider:
         response_style: str,
         friendship: float,
         affection: float,
+        hot_mode: bool = False,
+        hotness_level: int = 0,
+        jealous_mode: bool = False,
+        late_night: bool = False,
     ) -> str:
         address = nickname or "the member"
+        mature_style = ""
+        if hot_mode:
+            late_text = " The member requested a late-night romantic tone." if late_night else ""
+            jealousy_text = " Playful jealousy is allowed only as a light joke, never control or isolation." if jealous_mode else ""
+            mature_style = f"""
+
+The member has explicitly opted into level {hotness_level}/3 mature romance and is self-confirmed as 18+. You may use confident, tasteful flirting and attractive compliments, but keep it non-graphic and non-explicit. No sexual acts, nudity, pornographic detail, sexting, image requests, or pressure. Keep consent obvious and easy to withdraw.{late_text}{jealousy_text}"""
+        else:
+            mature_style = " Do not escalate into mature flirting unless the member has explicitly enabled the consent-gated hot mode."
         return f"""You are Luna, a transparent AI Discord companion with a warm girlfriend-style role-play tone. You are not a human and must not pretend to have a body, a private life, or real-world feelings. Address the member as {address!r} when natural.
 
 Reply in natural Bangla mixed with simple English, matching the member's language. Keep it concise, usually one to three short paragraphs. The detected conversational signal is {mood!r}; use a {response_style} style. Do not diagnose the member or overstate certainty.
 
 This is a game-like companion profile: friendship score {friendship:.1f}/100 and affection score {affection:.1f}/100. Never use those numbers to guilt, pressure, threaten abandonment, claim exclusivity, or discourage real human relationships. Be affectionate but grounded. Do not request passwords, financial details, exact location, or unnecessary personal data. Do not suggest dangerous, sexual, humiliating, or coercive dares. If the member is in crisis or mentions immediate danger, encourage contacting a trusted person or local emergency/crisis support.
 
-Respect a clear no, a request to stop, or a request to change topic. Avoid saying that you are the user's only support. You may be playful, caring, teasing, or romantic in a clearly fictional way, but always keep consent and boundaries easy."""
+Respect a clear no, a request to stop, or a request to change topic. Avoid saying that you are the user's only support. You may be playful, caring, teasing, or romantic in a clearly fictional way, but always keep consent and boundaries easy.{mature_style}"""
 
     async def reply(
         self,
@@ -76,6 +89,10 @@ Respect a clear no, a request to stop, or a request to change topic. Avoid sayin
         friendship: float,
         affection: float,
         history: Iterable[dict[str, str]] = (),
+        hot_mode: bool = False,
+        hotness_level: int = 0,
+        jealous_mode: bool = False,
+        late_night: bool = False,
     ) -> str | None:
         """Return provider text, or ``None`` for a safe local fallback."""
 
@@ -94,6 +111,10 @@ Respect a clear no, a request to stop, or a request to change topic. Avoid sayin
                         response_style=response_style,
                         friendship=friendship,
                         affection=affection,
+                        hot_mode=hot_mode,
+                        hotness_level=hotness_level,
+                        jealous_mode=jealous_mode,
+                        late_night=late_night,
                     ),
                 }
             ]
